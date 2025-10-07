@@ -1,7 +1,7 @@
-const express = require("express");
-const axios = require("axios");
-const dns = require("dns");
-const net = require("net");
+import express from "express";
+import axios from "axios";
+import dns from "dns";
+import net from "net";
 
 const app = express();
 app.use(express.text({ type: "*/*" }));
