@@ -1,11 +1,12 @@
-import express from "express";
-import axios from "axios";
-import dns from "dns";
-import net from "net";
+const express = require("express");
+const axios = require("axios");
+const dns = require("dns");
+const net = require("net");
 
 const app = express();
 app.use(express.text({ type: "*/*" }));
 
+// Lista losowych User-Agentów
 // Lista losowych User-Agentów
 const userAgents = [
   // Ogólne przeglądarki
@@ -37,6 +38,7 @@ const userAgents = [
   "TwitterBot/1.0 (+https://developer.twitter.com/en/docs/twitter-for-websites)",
   "Applebot/0.1 (+http://www.apple.com/go/applebot)",
 ];
+
 
 // Sprawdza czy IP jest prywatne
 function isPrivateIp(ip) {
@@ -85,7 +87,8 @@ app.all("/proxy", async (req, res) => {
       headers: {
         "User-Agent": ua,
       },
-      validateStatus: () => true, // pozwala zwrócić każdy status
+      maxRedirects: 0, // nie podążaj automatycznie za 301
+      validateStatus: () => true, // pozwól przyjąć każdy kod statusu
     };
 
     if (["POST", "PUT", "PATCH"].includes(req.method)) {
@@ -97,8 +100,11 @@ app.all("/proxy", async (req, res) => {
 
     const response = await axios(config);
 
-    res.status(response.status).json({
-      status: response.status,
+    // Jeśli witryna zwróci 301, my zwracamy status 200
+    const statusToReturn = response.status === 301 ? 200 : response.status;
+
+    res.status(statusToReturn).json({
+      status: statusToReturn,
       data: response.data
     });
 
