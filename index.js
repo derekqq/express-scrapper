@@ -2,11 +2,14 @@ import express from "express";
 import axios from "axios";
 import dns from "dns";
 import net from "net";
+import { promisify } from "util";
 
 const app = express();
 app.use(express.text({ type: "*/*" }));
 
-// Lista losowych User-Agentów
+// Asynchroniczna wersja dns.lookup
+const lookup = promisify(dns.lookup);
+
 // Lista losowych User-Agentów
 const userAgents = [
   // Ogólne przeglądarki
@@ -39,8 +42,7 @@ const userAgents = [
   "Applebot/0.1 (+http://www.apple.com/go/applebot)",
 ];
 
-
-// Sprawdza czy IP jest prywatne
+// Sprawdzenie czy IP jest prywatne
 function isPrivateIp(ip) {
   if (!net.isIP(ip)) return true; // odrzuć IPv6 i niepoprawne
   const parts = ip.split(".").map(Number);
@@ -50,16 +52,6 @@ function isPrivateIp(ip) {
     (parts[0] === 192 && parts[1] === 168) ||
     (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
   );
-}
-
-// Rozwiązuje DNS i zwraca IP
-function resolveIp(host) {
-  return new Promise((resolve, reject) => {
-    dns.lookup(host, { family: 4 }, (err, address) => {
-      if (err) reject(err);
-      else resolve(address);
-    });
-  });
 }
 
 app.all("/proxy", async (req, res) => {
@@ -74,7 +66,7 @@ app.all("/proxy", async (req, res) => {
       return res.status(400).json({ status: 400, error: "Only http/https allowed." });
     }
 
-    const ip = await resolveIp(url.hostname);
+    const { address: ip } = await lookup(url.hostname, { family: 4 });
     if (isPrivateIp(ip)) {
       return res.status(403).json({ status: 403, error: "Blocked private or local IP." });
     }
@@ -84,11 +76,10 @@ app.all("/proxy", async (req, res) => {
     const config = {
       method: req.method,
       url: target,
-      headers: {
-        "User-Agent": ua,
-      },
-      maxRedirects: 0, // nie podążaj automatycznie za 301
-      validateStatus: () => true, // pozwól przyjąć każdy kod statusu
+      headers: { "User-Agent": ua },
+      responseType: "arraybuffer", // zawsze jako surowe bajty
+      maxRedirects: 0,              // nie śledź przekierowań
+      validateStatus: () => true    // pozwól zwrócić każdy kod
     };
 
     if (["POST", "PUT", "PATCH"].includes(req.method)) {
@@ -100,12 +91,30 @@ app.all("/proxy", async (req, res) => {
 
     const response = await axios(config);
 
-    // Jeśli witryna zwróci 301, my zwracamy status 200
+    // Zamień 301 -> 200
     const statusToReturn = response.status === 301 ? 200 : response.status;
+
+    const contentType = response.headers["content-type"] || "application/octet-stream";
+    let data;
+
+    try {
+      if (contentType.includes("application/json")) {
+        // JSON jako tekst (zachowujemy strukturę)
+        data = response.data.toString("utf8");
+      } else if (contentType.startsWith("text/") || contentType.includes("html") || contentType.includes("xml")) {
+        data = response.data.toString("utf8");
+      } else {
+        // inne typy binarne → base64
+        data = response.data.toString("base64");
+      }
+    } catch {
+      data = "[[unreadable response data]]";
+    }
 
     res.status(statusToReturn).json({
       status: statusToReturn,
-      data: response.data
+      contentType,
+      data
     });
 
   } catch (err) {
@@ -118,4 +127,5 @@ app.all("/proxy", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Proxy listening on http://localhost:${PORT}/proxy?url=...`));
+app.listen(PORT, () => console.log(`✅ Proxy listening at http://localhost:${PORT}/proxy?url=...`));
+
