@@ -73,10 +73,21 @@ app.all("/proxy", async (req, res) => {
 
     const ua = userAgents[Math.floor(Math.random() * userAgents.length)];
 
+    // Zbierz nagłówki od klienta (pomijając problematyczne)
+    const clientHeaders = { "User-Agent": ua };
+    const skipHeaders = ['host', 'connection', 'content-length', 'user-agent', 'origin'];
+    
+    Object.keys(req.headers).forEach(key => {
+      const lowerKey = key.toLowerCase();
+      if (!skipHeaders.includes(lowerKey)) {
+        clientHeaders[key] = req.headers[key];
+      }
+    });
+
     const config = {
       method: req.method,
       url: target,
-      headers: { "User-Agent": ua },
+      headers: clientHeaders,
       responseType: "arraybuffer", // zawsze jako surowe bajty
       maxRedirects: 0,              // nie śledź przekierowań
       validateStatus: () => true    // pozwól zwrócić każdy kod
@@ -84,9 +95,7 @@ app.all("/proxy", async (req, res) => {
 
     if (["POST", "PUT", "PATCH"].includes(req.method)) {
       config.data = req.body;
-      if (req.headers["content-type"]) {
-        config.headers["Content-Type"] = req.headers["content-type"];
-      }
+      // Content-Type już zostało dodane z req.headers powyżej
     }
 
     const response = await axios(config);
