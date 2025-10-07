@@ -1,140 +1,125 @@
 import express from "express";
-import axios from "axios";
-import dns from "dns";
-import net from "net";
-import { promisify } from "util";
+import fetch from "node-fetch";
+import { URL } from "url";
+import dns from "dns/promises";
+import { gunzipSync } from "zlib";
 
 const app = express();
-app.use(express.text({ type: "*/*" }));
-
-// Asynchroniczna wersja dns.lookup
-const lookup = promisify(dns.lookup);
+app.use(express.json());
+app.use(express.text({ type: "*/*" })); // obsługa surowego body
 
 // Lista losowych User-Agentów
 const userAgents = [
-  // Ogólne przeglądarki
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15",
-  "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/129.0",
-
-  // Klienci API i boty AI
-  "OpenAI-API/1.0 (ChatGPT/5.0)",
-  "Anthropic-AI/1.0 (Claude/3.5)",
-  "Google-LLM/1.0 (Gemini/2.0)",
-  "PerplexityBot/1.3 (+https://www.perplexity.ai)",
-  "Copilot/1.0 (GitHub; Microsoft AI Assistant)",
-  "DuckAssist/1.0 (+https://duckduckgo.com/assist)",
-  "YouChat/2.0 (+https://you.com/)",
-  "MistralAI/1.0 (+https://mistral.ai)",
-  "HuggingFace-Transformers/4.43 (InferenceAPI)",
-  "LLaMA-Agent/1.0 (Meta AI)",
-  "Cohere-CommandR/1.0 (+https://cohere.ai)",
-  "ChatGPTBot/1.0 (+https://chat.openai.com)",
-
-  // Inne boty indeksujące i testowe
-  "Googlebot/2.1 (+http://www.google.com/bot.html)",
-  "Bingbot/2.0 (+http://www.bing.com/bingbot.htm)",
-  "DuckDuckBot/1.1 (+http://duckduckgo.com/duckduckbot.html)",
-  "GPTBot/1.0 (+https://openai.com/gptbot)",
-  "ClaudeBot/1.0 (+https://www.anthropic.com/bot)",
-  "FacebookBot/1.0 (+https://www.facebook.com/externalhit_uatext.php)",
-  "TwitterBot/1.0 (+https://developer.twitter.com/en/docs/twitter-for-websites)",
-  "Applebot/0.1 (+http://www.apple.com/go/applebot)",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15",
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  "OpenAI-Client/1.0 (+https://openai.com/)",
+  "curl/8.4.0",
 ];
 
-// Sprawdzenie czy IP jest prywatne
+// Funkcja sprawdzająca, czy IP jest prywatne
 function isPrivateIp(ip) {
-  if (!net.isIP(ip)) return true; // odrzuć IPv6 i niepoprawne
-  const parts = ip.split(".").map(Number);
+  const octets = ip.split(".").map(Number);
+  if (octets.length !== 4 || octets.some(isNaN)) return true;
+
+  const [a, b] = octets;
   return (
-    parts[0] === 10 ||
-    parts[0] === 127 ||
-    (parts[0] === 192 && parts[1] === 168) ||
-    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a === 127
   );
 }
 
+// Proxy endpoint
 app.all("/proxy", async (req, res) => {
-  const target = req.query.url;
-  if (!target) {
+  const targetUrl = req.query.url;
+  const responseType = req.query.responseType || "auto";
+
+  if (!targetUrl) {
     return res.status(400).json({ status: 400, error: "Missing 'url' parameter." });
   }
 
+  let url;
   try {
-    const url = new URL(target);
-    if (!["http:", "https:"].includes(url.protocol)) {
-      return res.status(400).json({ status: 400, error: "Only http/https allowed." });
-    }
+    url = new URL(targetUrl);
+    if (!["http:", "https:"].includes(url.protocol)) throw new Error();
+  } catch {
+    return res.status(400).json({ status: 400, error: "Invalid URL." });
+  }
 
-    const { address: ip } = await lookup(url.hostname, { family: 4 });
-    if (isPrivateIp(ip)) {
+  // Blokada prywatnych IP
+  try {
+    const ips = await dns.lookup(url.hostname, { all: true });
+    if (ips.some(ipObj => isPrivateIp(ipObj.address))) {
       return res.status(403).json({ status: 403, error: "Blocked private or local IP." });
     }
+  } catch {
+    return res.status(403).json({ status: 403, error: "Blocked private or local IP." });
+  }
 
-    const ua = userAgents[Math.floor(Math.random() * userAgents.length)];
+  // Nagłówki
+  const headers = {};
+  headers["User-Agent"] = userAgents[Math.floor(Math.random() * userAgents.length)];
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (!["host", "connection", "content-length", "user-agent"].includes(key.toLowerCase())) {
+      headers[key] = value;
+    }
+  }
 
-    // Zbierz nagłówki od klienta (pomijając problematyczne)
-    const clientHeaders = { "User-Agent": ua };
-    const skipHeaders = ['host', 'connection', 'content-length', 'user-agent', 'origin'];
-    
-    Object.keys(req.headers).forEach(key => {
-      const lowerKey = key.toLowerCase();
-      if (!skipHeaders.includes(lowerKey)) {
-        clientHeaders[key] = req.headers[key];
-      }
-    });
+  // Body
+  let body;
+  if (["POST", "PUT", "PATCH"].includes(req.method)) {
+    body = req.body;
+  }
 
-    const config = {
+  try {
+    const response = await fetch(targetUrl, {
       method: req.method,
-      url: target,
-      headers: clientHeaders,
-      responseType: "arraybuffer", // zawsze jako surowe bajty
-      maxRedirects: 0,              // nie śledź przekierowań
-      validateStatus: () => true    // pozwól zwrócić każdy kod
-    };
+      headers,
+      body: body && typeof body === "string" ? body : undefined,
+      redirect: "manual", // nie podążaj za redirectami
+    });
 
-    if (["POST", "PUT", "PATCH"].includes(req.method)) {
-      config.data = req.body;
-      // Content-Type już zostało dodane z req.headers powyżej
-    }
+    let data = await response.arrayBuffer();
+    const contentType = response.headers.get("content-type") || "text/plain";
 
-    const response = await axios(config);
+    let responseData;
 
-    // Zamień 301 -> 200
-    const statusToReturn = response.status === 301 ? 200 : response.status;
-
-    const contentType = response.headers["content-type"] || "application/octet-stream";
-    let data;
-
-    try {
-      if (contentType.includes("application/json")) {
-        // JSON jako tekst (zachowujemy strukturę)
-        data = response.data.toString("utf8");
-      } else if (contentType.startsWith("text/") || contentType.includes("html") || contentType.includes("xml")) {
-        data = response.data.toString("utf8");
-      } else {
-        // inne typy binarne → base64
-        data = response.data.toString("base64");
+    // Obsługa gzip
+    const buf = Buffer.from(data);
+    if (responseType === "json" && buf[0] === 0x1f && buf[1] === 0x8b) {
+      try {
+        responseData = gunzipSync(buf).toString("utf-8");
+      } catch {
+        responseData = buf.toString("base64");
       }
-    } catch {
-      data = "[[unreadable response data]]";
+    } else if (responseType === "json") {
+      responseData = buf.toString("utf-8");
+    } else if (responseType === "html") {
+      responseData = buf.toString("utf-8");
+    } else if (responseType === "text") {
+      responseData = buf.toString("utf-8");
+    } else {
+      // auto
+      if (contentType.startsWith("image/") || contentType.startsWith("application/pdf")) {
+        responseData = buf.toString("base64");
+      } else {
+        responseData = buf.toString("utf-8");
+      }
     }
 
-    res.status(statusToReturn).json({
-      status: statusToReturn,
+    // Zwróć JSON
+    res.status(response.status === 301 ? 200 : response.status).json({
+      status: response.status === 301 ? 200 : response.status,
       contentType,
-      data
+      data: responseData,
     });
-
   } catch (err) {
-    res.status(502).json({
-      status: 502,
-      error: "Error fetching target URL.",
-      details: err.message
-    });
+    res.status(502).json({ status: 502, error: "Error fetching target URL." });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Proxy listening at http://localhost:${PORT}/proxy?url=...`));
-
+app.listen(3000, () => {
+  console.log("Proxy server running on http://localhost:3000");
+});
